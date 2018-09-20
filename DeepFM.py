@@ -24,7 +24,7 @@ class DeepFM(BaseEstimator, TransformerMixin):
                  learning_rate=0.001, optimizer_type="adam",
                  batch_norm=0, batch_norm_decay=0.995,
                  verbose=False, random_seed=2016,
-                 use_fm=True, use_deep=True,
+                 use_fm=True, use_deep=True, use_xfm=True,
                  loss_type="logloss", eval_metric=roc_auc_score,
                  l2_reg=0.0, greater_is_better=True):
         assert (use_fm or use_deep)
@@ -41,6 +41,7 @@ class DeepFM(BaseEstimator, TransformerMixin):
         self.deep_layers_activation = deep_layers_activation
         self.use_fm = use_fm
         self.use_deep = use_deep
+        self.use_xfm = use_xfm
         self.l2_reg = l2_reg
 
         self.epoch = epoch
@@ -102,6 +103,77 @@ class DeepFM(BaseEstimator, TransformerMixin):
             self.y_second_order = 0.5 * tf.subtract(self.summed_features_emb_square, self.squared_sum_features_emb)  # None * K
             self.y_second_order = tf.nn.dropout(self.y_second_order, self.dropout_keep_fm[1])  # None * K
 
+            # high order
+            if self.use_fm and self.use_deep:
+                z = tf.layers.Dense(self.embedding_size, kernel_initializer=tf.glorot_uniform_initializer(seed=2017),
+                                            dtype=tf.float32,
+                                            bias_initializer=tf.zeros_initializer())(self.y_second_order)
+                z = tf.nn.relu(z)
+                y_second_order = tf.nn.dropout(z, 0.5)
+
+            if self.use_xfm:
+                field_nums = [self.field_size]
+                final_len = 0
+                # self.embeddings = None * F * K
+                hidden_nn_layers = [self.embeddings]
+                final_result = []
+                split_tensor0 = tf.split(hidden_nn_layers[-1], self.embedding_size * [1], 2)
+
+                for idx, layer_size in enumerate([self.field_size]*3):
+                    split_tensor = tf.split(hidden_nn_layers[-1], self.embedding_size * [1], 2)
+                    dot_result_m = tf.matmul(split_tensor0, split_tensor, transpose_b=True)
+                    dot_result_o = tf.reshape(dot_result_m, shape=[self.embedding_size, -1, field_nums[0]*field_nums[-1]])
+                    dot_result = tf.transpose(dot_result_o, perm=[1, 0, 2])
+
+                    filters = tf.get_variable(name="f_"+str(idx),
+                                         shape=[1, field_nums[-1]*field_nums[0], layer_size],
+                                         dtype=tf.float32)
+                    curr_out = tf.nn.conv1d(dot_result, filters=filters, stride=1, padding='VALID')
+
+                    # if bians:
+                    b = tf.get_variable(name="f_b" + str(idx),
+                                    shape=[layer_size],
+                                    dtype=tf.float32,
+                                    initializer=tf.zeros_initializer())
+                    curr_out = tf.nn.bias_add(curr_out, b)
+
+                    curr_out = tf.nn.relu(curr_out)
+                    curr_out = tf.transpose(curr_out, perm=[0, 2, 1])
+
+                    direct_connect = curr_out
+                    next_hidden = curr_out
+                    final_len += layer_size
+                    field_nums.append(int(layer_size))
+
+                    final_result.append(direct_connect)
+                    hidden_nn_layers.append(next_hidden)
+
+                result = tf.concat(final_result, axis=1)
+                result = tf.reduce_sum(result, -1)
+
+                # res net
+                w_nn_output1 = tf.get_variable(name='w_nn_output1',
+                                               shape=[final_len, 128],
+                                               dtype=tf.float32)
+                b_nn_output1 = tf.get_variable(name='b_nn_output1',
+                                               shape=[128],
+                                               dtype=tf.float32,
+                                               initializer=tf.zeros_initializer())
+
+                exFM_out0 = tf.nn.xw_plus_b(result, w_nn_output1, b_nn_output1)
+                exFM_out1 = tf.nn.dropout(exFM_out0, 0.3)
+                exFM_out1 = tf.nn.relu(exFM_out1)
+                w_nn_output2 = tf.get_variable(name='w_nn_output2',
+                                               shape=[128 + final_len, self.embedding_size],
+                                               dtype=tf.float32)
+                b_nn_output2 = tf.get_variable(name='b_nn_output2',
+                                               shape=[self.embedding_size],
+                                               dtype=tf.float32,
+                                               initializer=tf.zeros_initializer())
+
+                exFM_in = tf.concat([exFM_out1, result], axis=1, name="user_emb")
+                self.exFM_out = tf.nn.xw_plus_b(exFM_in, w_nn_output2, b_nn_output2)
+
             # ---------- Deep component ----------
             self.y_deep = tf.reshape(self.embeddings, shape=[-1, self.field_size * self.embedding_size]) # None * (F*K)
             self.y_deep = tf.nn.dropout(self.y_deep, self.dropout_keep_deep[0])
@@ -115,10 +187,13 @@ class DeepFM(BaseEstimator, TransformerMixin):
             # ---------- DeepFM ----------
             if self.use_fm and self.use_deep:
                 concat_input = tf.concat([self.y_first_order, self.y_second_order, self.y_deep], axis=1)
+            elif self.use_xfm and self.use_deep:
+                concat_input = tf.concat([self.y_first_order, self.exFM_out, self.y_deep], axis=1)
             elif self.use_fm:
                 concat_input = tf.concat([self.y_first_order, self.y_second_order], axis=1)
             elif self.use_deep:
                 concat_input = self.y_deep
+
             self.out = tf.add(tf.matmul(concat_input, self.weights["concat_projection"]), self.weights["concat_bias"])
 
             # loss
@@ -153,6 +228,7 @@ class DeepFM(BaseEstimator, TransformerMixin):
                     self.loss)
 
             # init
+            self.model_path = './model'
             self.saver = tf.train.Saver()
             init = tf.global_variables_initializer()
             self.sess = self._init_session()
@@ -205,6 +281,8 @@ class DeepFM(BaseEstimator, TransformerMixin):
 
         # final concat projection layer
         if self.use_fm and self.use_deep:
+            input_size = self.field_size + self.embedding_size + self.deep_layers[-1]
+        if self.use_xfm and self.use_deep:
             input_size = self.field_size + self.embedding_size + self.deep_layers[-1]
         elif self.use_fm:
             input_size = self.field_size + self.embedding_size
@@ -274,6 +352,12 @@ class DeepFM(BaseEstimator, TransformerMixin):
         :return: None
         """
         has_valid = Xv_valid is not None
+        if has_valid:
+            if self.greater_is_better:
+                best_valid_score = -1
+            else:
+                best_valid_score = 1e9
+
         for epoch in range(self.epoch):
             t1 = time()
             self.shuffle_in_unison_scary(Xi_train, Xv_train, y_train)
@@ -288,6 +372,14 @@ class DeepFM(BaseEstimator, TransformerMixin):
             if has_valid:
                 valid_result = self.evaluate(Xi_valid, Xv_valid, y_valid)
                 self.valid_result.append(valid_result)
+
+                if self.greater_is_better and best_valid_score < valid_result:
+                    best_valid_score = valid_result
+                    self.saver.save(self.sess, self.model_path)
+                elif not self.greater_is_better and valid_result < best_valid_score:
+                    best_valid_score = valid_result
+                    self.saver.save(self.sess, self.model_path)
+
             if self.verbose > 0 and epoch % self.verbose == 0:
                 if has_valid:
                     print("[%d] train-result=%.4f, valid-result=%.4f [%.1f s]"
@@ -298,26 +390,37 @@ class DeepFM(BaseEstimator, TransformerMixin):
             if has_valid and early_stopping and self.training_termination(self.valid_result):
                 break
 
+        if has_valid:
+            self.saver.restore(self.sess, self.model_path)
+            print('best valid score: ', self.evaluate(Xi_valid, Xv_valid, y_valid))
+
         # fit a few more epoch on train+valid until result reaches the best_train_score
         if has_valid and refit:
+            print('refit: ')
             if self.greater_is_better:
                 best_valid_score = max(self.valid_result)
             else:
                 best_valid_score = min(self.valid_result)
+            print('best valid scor', best_valid_score)
+
             best_epoch = self.valid_result.index(best_valid_score)
             best_train_score = self.train_result[best_epoch]
             Xi_train = Xi_train + Xi_valid
             Xv_train = Xv_train + Xv_valid
             y_train = y_train + y_valid
             for epoch in range(100):
+                t1 = time()
                 self.shuffle_in_unison_scary(Xi_train, Xv_train, y_train)
                 total_batch = int(len(y_train) / self.batch_size)
                 for i in range(total_batch):
                     Xi_batch, Xv_batch, y_batch = self.get_batch(Xi_train, Xv_train, y_train,
                                                                 self.batch_size, i)
                     self.fit_on_batch(Xi_batch, Xv_batch, y_batch)
+
                 # check
                 train_result = self.evaluate(Xi_train, Xv_train, y_train)
+                print("[%d] train-result=%.4f [%.1f s]"
+                    % (epoch + 1, train_result, time() - t1))
                 if abs(train_result - best_train_score) < 0.001 or \
                     (self.greater_is_better and train_result > best_train_score) or \
                     ((not self.greater_is_better) and train_result < best_train_score):
@@ -325,18 +428,14 @@ class DeepFM(BaseEstimator, TransformerMixin):
 
 
     def training_termination(self, valid_result):
-        if len(valid_result) > 5:
+        if len(valid_result) > 3:
             if self.greater_is_better:
                 if valid_result[-1] < valid_result[-2] and \
-                    valid_result[-2] < valid_result[-3] and \
-                    valid_result[-3] < valid_result[-4] and \
-                    valid_result[-4] < valid_result[-5]:
+                        valid_result[-2] < valid_result[-3]:
                     return True
             else:
                 if valid_result[-1] > valid_result[-2] and \
-                    valid_result[-2] > valid_result[-3] and \
-                    valid_result[-3] > valid_result[-4] and \
-                    valid_result[-4] > valid_result[-5]:
+                        valid_result[-2] > valid_result[-3]:
                     return True
         return False
 

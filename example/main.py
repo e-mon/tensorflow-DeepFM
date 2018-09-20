@@ -1,4 +1,3 @@
-
 import os
 import sys
 
@@ -66,7 +65,7 @@ def _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params):
         Xi_valid_, Xv_valid_, y_valid_ = _get(Xi_train, valid_idx), _get(Xv_train, valid_idx), _get(y_train, valid_idx)
 
         dfm = DeepFM(**dfm_params)
-        dfm.fit(Xi_train_, Xv_train_, y_train_, Xi_valid_, Xv_valid_, y_valid_)
+        dfm.fit(Xi_train_, Xv_train_, y_train_, Xi_valid_, Xv_valid_, y_valid_, early_stopping=False, refit=False)
 
         y_train_meta[valid_idx,0] = dfm.predict(Xi_valid_, Xv_valid_)
         y_test_meta[:,0] += dfm.predict(Xi_test, Xv_test)
@@ -80,6 +79,8 @@ def _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params):
     # save result
     if dfm_params["use_fm"] and dfm_params["use_deep"]:
         clf_str = "DeepFM"
+    elif dfm_params["use_xfm"] and dfm_params["use_deep"]:
+        clf_str = "xDeepFM"
     elif dfm_params["use_fm"]:
         clf_str = "FM"
     elif dfm_params["use_deep"]:
@@ -88,7 +89,7 @@ def _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params):
     filename = "%s_Mean%.5f_Std%.5f.csv"%(clf_str, gini_results_cv.mean(), gini_results_cv.std())
     _make_submission(ids_test, y_test_meta, filename)
 
-    _plot_fig(gini_results_epoch_train, gini_results_epoch_valid, clf_str)
+    # _plot_fig(gini_results_epoch_train, gini_results_epoch_valid, clf_str)
 
     return y_train_meta, y_test_meta
 
@@ -118,6 +119,8 @@ def _plot_fig(train_results, valid_results, model_name):
 
 # load data
 dfTrain, dfTest, X_train, y_train, X_test, ids_test, cat_features_indices = _load_data()
+dfTrain.to_csv('train.csv')
+dfTest.to_csv('test.csv')
 
 # folds
 folds = list(StratifiedKFold(n_splits=config.NUM_SPLITS, shuffle=True,
@@ -127,25 +130,34 @@ folds = list(StratifiedKFold(n_splits=config.NUM_SPLITS, shuffle=True,
 # ------------------ DeepFM Model ------------------
 # params
 dfm_params = {
-    "use_fm": True,
+    "use_fm": False,
     "use_deep": True,
-    "embedding_size": 8,
+    "use_xfm": True,
+    "embedding_size": 16,
     "dropout_fm": [1.0, 1.0],
     "deep_layers": [32, 32],
     "dropout_deep": [0.5, 0.5, 0.5],
     "deep_layers_activation": tf.nn.relu,
-    "epoch": 30,
+    "epoch": 15,
     "batch_size": 1024,
     "learning_rate": 0.001,
     "optimizer_type": "adam",
     "batch_norm": 1,
     "batch_norm_decay": 0.995,
-    "l2_reg": 0.01,
+    "l2_reg": 0.001,
     "verbose": True,
     "eval_metric": gini_norm,
     "random_seed": config.RANDOM_SEED
 }
+
+# ------------------ xDeepFM Model ------------------
 y_train_dfm, y_test_dfm = _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params)
+
+# ------------------ FM Model ------------------
+fm_params = dfm_params.copy()
+fm_params["use_xfm"] = False
+fm_params["use_fm"] = True
+y_train_fm, y_test_fm = _run_base_model_dfm(dfTrain, dfTest, folds, fm_params)
 
 # ------------------ FM Model ------------------
 fm_params = dfm_params.copy()
