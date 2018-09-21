@@ -44,6 +44,16 @@ def _load_data():
 
 
 def _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params):
+    if dfm_params["use_fm"] and dfm_params["use_deep"]:
+        clf_str = "DeepFM"
+    elif dfm_params["use_xfm"] and dfm_params["use_deep"]:
+        clf_str = "xDeepFM"
+    elif dfm_params["use_fm"]:
+        clf_str = "FM"
+    elif dfm_params["use_deep"]:
+        clf_str = "DNN"
+
+    print('start training:', clf_str)
     fd = FeatureDictionary(dfTrain=dfTrain, dfTest=dfTest,
                            numeric_cols=config.NUMERIC_COLS,
                            ignore_cols=config.IGNORE_COLS)
@@ -77,19 +87,11 @@ def _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params):
     y_test_meta /= float(len(folds))
 
     # save result
-    if dfm_params["use_fm"] and dfm_params["use_deep"]:
-        clf_str = "DeepFM"
-    elif dfm_params["use_xfm"] and dfm_params["use_deep"]:
-        clf_str = "xDeepFM"
-    elif dfm_params["use_fm"]:
-        clf_str = "FM"
-    elif dfm_params["use_deep"]:
-        clf_str = "DNN"
     print("%s: %.5f (%.5f)"%(clf_str, gini_results_cv.mean(), gini_results_cv.std()))
     filename = "%s_Mean%.5f_Std%.5f.csv"%(clf_str, gini_results_cv.mean(), gini_results_cv.std())
     _make_submission(ids_test, y_test_meta, filename)
 
-    # _plot_fig(gini_results_epoch_train, gini_results_epoch_valid, clf_str)
+    _plot_fig(gini_results_epoch_train, gini_results_epoch_valid, clf_str)
 
     return y_train_meta, y_test_meta
 
@@ -138,7 +140,7 @@ dfm_params = {
     "deep_layers": [32, 32],
     "dropout_deep": [0.5, 0.5, 0.5],
     "deep_layers_activation": tf.nn.relu,
-    "epoch": 15,
+    "epoch": 30,
     "batch_size": 1024,
     "learning_rate": 0.001,
     "optimizer_type": "adam",
@@ -151,23 +153,25 @@ dfm_params = {
 }
 
 # ------------------ xDeepFM Model ------------------
-y_train_dfm, y_test_dfm = _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params)
+# y_train_dfm, y_test_dfm = _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params)
 
 # ------------------ FM Model ------------------
-fm_params = dfm_params.copy()
-fm_params["use_xfm"] = False
-fm_params["use_fm"] = True
-y_train_fm, y_test_fm = _run_base_model_dfm(dfTrain, dfTest, folds, fm_params)
+# fm_params = dfm_params.copy()
+# fm_params["use_xfm"] = False
+# fm_params["use_fm"] = True
+# y_train_fm, y_test_fm = _run_base_model_dfm(dfTrain, dfTest, folds, fm_params)
 
 # ------------------ FM Model ------------------
 fm_params = dfm_params.copy()
 fm_params["use_deep"] = False
+fm_params["use_xfm"] = False
+fm_params["use_fm"] = True
 y_train_fm, y_test_fm = _run_base_model_dfm(dfTrain, dfTest, folds, fm_params)
 
 
 # ------------------ DNN Model ------------------
 dnn_params = dfm_params.copy()
-dnn_params["use_fm"] = False
+fm_params["use_xfm"] = False
 y_train_dnn, y_test_dnn = _run_base_model_dfm(dfTrain, dfTest, folds, dnn_params)
 
 

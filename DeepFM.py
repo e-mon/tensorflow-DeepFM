@@ -282,7 +282,7 @@ class DeepFM(BaseEstimator, TransformerMixin):
         # final concat projection layer
         if self.use_fm and self.use_deep:
             input_size = self.field_size + self.embedding_size + self.deep_layers[-1]
-        if self.use_xfm and self.use_deep:
+        elif self.use_xfm and self.use_deep:
             input_size = self.field_size + self.embedding_size + self.deep_layers[-1]
         elif self.use_fm:
             input_size = self.field_size + self.embedding_size
